@@ -1,0 +1,1036 @@
+---
+title: "Final Project"
+
+date: today
+
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: flatly
+---
+
+```{r document_setup, echo=F, message=F, warning=F}
+# This chunk can include things you need for the rest of the document
+library('ggplot2') ## most of the time you will need ggplot
+theme_set(theme_bw()) # change the default ggplot theme to black-and-white
+
+knitr::opts_chunk$set(
+  echo=T, ## show your R code chunk
+  message = F, ## hide the message
+  warning = F, ## hide the warning
+  autodep = T ## make sure your separate code chunks can find the dependencies (from other code chunk)
+)
+```
+
+```{r,package}
+library(dplyr)
+library(ggplot2)
+library(tm)
+library(textshape)
+library(lexicon)
+library(textclean)
+library(broom)
+library(tidytext)
+library(gridExtra)
+library(tidyverse)
+library(caret)
+library(caTools)
+library(ROCR)
+library(rpart)
+library(rpart.plot)
+library(ISLR)
+
+```
+## Import
+```{r,import_data}
+support <- read.csv(file = "/Users/zixuan zhu/Desktop/users.csv")
+tweet <- read.csv(file = "/Users/zixuan zhu/Desktop/tweets_debate3.csv")
+#samp<-sample(nrow(tweet),5000)
+#tweet<-tweet[samp,]
+#head(tweet)
+```
+
+```{r,merge_support}
+tweet<-merge(tweet , support )
+#subset(tweet, follow_candidate!="NAN", select=-c(location))
+tweet<- subset(tweet, follow_candidate!="NAN", select=c(userID, text,follow_candidate))
+#head(tweet)
+```
+
+
+```{r,exp_data}
+set.seed(42)
+select = 1000
+
+T_tweet<-tweet%>%filter(follow_candidate=='trump')
+C_tweet<-tweet%>%filter(follow_candidate=='clinton')
+#T_tweet
+#C_tweet
+
+t_exp = sample(nrow(T_tweet),select)
+c_exp = sample(nrow(C_tweet),select)
+t = T_tweet[t_exp ,]
+#t
+c = C_tweet[c_exp ,]
+#c
+rows <- sample(2*select)
+tweet_exp<-rbind(t,c)
+#dim(exp_data)
+tweet_exp <- tweet_exp[rows, ]
+##50% trump ---- 50% clinton
+```
+
+```{r}
+#index = which(tweet$userID ==c(tweet_exp$userID) )
+```
+
+##The first feature--TDM(TF-IDF)
+###preprocessing
+```{r,initail_clean}
+# initial clean
+a=gsub("RT ","",tweet_exp$text)
+a = gsub("&amp", "", a)
+a = gsub("@HillaryClinton", "HIllAryClinton", a)
+a = gsub("@realDonaldTrump", "DONaldTrump", a)
+a=replace_tag(a)
+a = gsub("@\\w+", "", a)
+a=gsub("#","",a)
+a=replace_url(a)
+a=replace_emoji(a)
+a=replace_html(a)
+a=replace_white(a)
+a=replace_word_elongation(a)
+a = gsub(":", "", a)
+a = gsub("[[:punct:]]", "", a)
+#replace_emoji(support_tweet$text[1])
+#lapply(support_tweet$text,replace_emoji)
+#replace_symbol(support_tweet$text, remove=TRUE)
+tweet_exp$text=a
+index=1-c(is.na(tweet_exp$text))  # remove NA row, generated after text clean
+tweet_exp=tweet_exp[index==1,]
+```
+```{r,corpus_clean}
+CleanCorpus <- function(x){
+    x <- tm_map(x, content_transformer(tolower))
+     x <- tm_map(x, removeNumbers) #remove numbers before removing words. Otherwise "trump2016" leaves "trump"
+     #x <- tm_map(x, removeWords, tidytext::stop_words$word)
+     x <- tm_map(x, removeWords, tidytext::stop_words$word)
+     x <- tm_map(x, removePunctuation)
+   # x <- tm_map(x, function(x) removeWords(x, stopwords("english")))
+     x <- tm_map(x, removeWords, c("debate", 'debates',"debatenight",'tonight','support'))
+     x <- tm_map(x, removeWords, tidytext::stop_words$word)
+    x<-tm_map(x, stemDocument, language = "english") 
+   x <- tm_map(x, removeWords, tidytext::stop_words$word)
+   
+      x <- tm_map(x, stripWhitespace)
+      
+      
+      
+     return(x)
+}
+
+RemoveNames <- function(x) {
+       x <- tm_map(x, removeWords, c("donald", "hillary", "clinton", "trump", "realdonaldtrump", "hillaryclinton",'hilary','hillaryclinton','donaldtrump','hillari','hllaryclinton','hilari'))
+       return(x)
+}
+
+
+Trump=c("donald", "trumps", "trump", "realdonaldtrump", 'donaldtrump')
+Clinton=c("hillary", "clinton",  "hillaryclinton",'hilary','hillari')
+
+CreateTermsMatrix <- function(x) {
+        x <- TermDocumentMatrix(x)
+        x <- as.matrix(x)
+        y <- rowSums(x)
+        y <- sort(y, decreasing=TRUE)
+        return(y)
+}
+```
+
+
+```{r, TDM_feature}
+f1corpus = Corpus(VectorSource(tweet_exp$text))
+f1corpus = CleanCorpus(f1corpus)
+f1corpus=RemoveNames(f1corpus)
+```
+###term-Document Matrix
+
+```{r}
+td.mat = as.matrix(TermDocumentMatrix(f1corpus))
+#td.mat[1:3,]
+dim(td.mat)
+```
+### TF-IDF
+```{r,TF_IDF}
+library(tm)
+library(lsa)
+library(SnowballC)
+td.mat.w = lw_tf(td.mat) * gw_idf(td.mat)  ## tf-idf weighting
+```
+
+
+##Model
+###K-means
+```{r,kmean}
+set.seed(1)
+kfit<-kmeans(t(td.mat.w), centers=2, nstart=10)
+```
+
+```{r}
+cluster<-cbind(tweet_exp,pred=kfit$cluster)
+
+tab<-table(kfit$cluster,tweet_exp$follow_candidate)
+tab
+sum(diag(tab))/sum(rowSums(tab))
+#Accuracy: 0.5005061
+#Sensitivity: 2/(2+2) = 0.5
+#Specificity: 987/(987+985) = 0.5005071
+#F1 score: 2*(0.5 * 0.5005071)/(0.5 + 0.5005071) = 0.5002534
+```
+
+
+```{r}
+conclusion <- matrix(c(0.5005061,0.5,0.5005071,0.5002534),ncol=4,byrow=TRUE)
+colnames(conclusion) <- c("Accuracy","Sensitivity",
+                     "Specificity",
+                     "F1 score")
+rownames(conclusion) <- 'Kmeans'
+conclusion <- as.table(conclusion)
+conclusion
+```
+
+###SVM
+
+```{r,svm_1}
+library(e1071)
+#samp<-sample(nrow(tweet_exp),0.8*nrow(tweet_exp))
+svm<-data.frame(label=tweet_exp$follow_candidate,t(td.mat.w))
+```
+
+
+```{r,svm_2, }
+library(rsample)
+
+svm$label = ifelse(svm$label=="clinton", 0 , 1)
+
+svm$label <- factor(svm$label)
+
+set.seed(1)
+split <- initial_split(svm, prop = 0.8,
+                       strata = 'label')
+set.seed(1)
+train <- training(split)
+set.seed(1)
+test <- testing(split)
+
+set.seed(1)
+model = svm(label ~ ., data = train,
+              kernel = "linear")
+```
+
+```{r,svm_3}
+set.seed(1)
+svm_pre<-predict(model,test)
+
+tab<-table(svm_pre,test$label)
+#table(tweet[-samp,]$follow_candidate)
+tab
+sum(diag(tab))/sum(rowSums(tab))
+# Accuracy: 0.6167513
+# Sensitivity: 107/(107+61) = 0.6369048
+# Specificity: 136/(136+90) = 0.6017699
+# F1 score: 2*(0.6369048 * 0.6017699)/(0.6369048 + 0.6017699) = 0.6188391
+
+```
+
+```{r}
+conclusion <- matrix(c(0.6167513,0.6369048,0.6017699,0.6188391),ncol=4,byrow=TRUE)
+colnames(conclusion) <- c("Accuracy","Sensitivity",
+                     "Specificity",
+                     "F1 score")
+rownames(conclusion) <- 'SVM'
+conclusion <- as.table(conclusion)
+conclusion
+```
+
+
+```{r}
+#detach(package:neuralnet)
+
+set.seed(1)
+model_svm = svm(label~., data = train,
+              kernel = "linear", cost =1, scale = T,
+              probability = TRUE,type="C-classification")
+
+test$p <- predict(model_svm, test, type="response")
+test$label_roc <- as.numeric(test$label)-1
+test$p <- as.numeric(test$p)-1
+pr<-prediction(test$p, test$label_roc)
+pref <- performance(pr, "tpr", "fpr")
+plot(pref, main = "ROC Curve", xlab = "1 - Specificity",  ylab = "Sensitivity",  colorize=TRUE)
+abline(0,1)
+```
+
+```{r, AUC value}
+perf_auc = performance(pr, "auc")
+as.numeric(perf_auc@y.values)
+```
+
+
+###tree
+
+```{r, tree_1}
+tree = rpart(label ~ ., method = "class", data = train, minbucket = 10, cp = 0)
+
+set.seed(1)
+prp(tree, extra = 1)
+
+# overplotting
+plotcp(tree)
+
+# best cp which is 1 standard deviation below mean is when cp=0
+# increase minbucket of tree to make it not overplotting
+tree2 = rpart(label ~ ., method = "class", data = train, minbucket = 35, cp = 0)
+set.seed(1)
+prp(tree2, extra = 1)
+```
+
+```{r, tree_2}
+test$pred_tree = predict(tree2, newdata = test, type="class")
+conf_matrix = table(test$label,test$pred_tree)
+conf_matrix
+sum(diag(conf_matrix))/sum(rowSums(conf_matrix))
+
+# Accuracy:0.5253807
+# Sensitivity: 183/(183+14) = 0.928934
+# Specificity: 24/(24+173) = 0.1218274
+# F1 score: 2*(0.928934 * 0.1218274)/(0.928934 + 0.1218274) = 0.215405
+```
+
+
+```{r}
+conclusion <- matrix(c(0.5253807,0.928934,0.1218274,0.215405),ncol=4,byrow=TRUE)
+colnames(conclusion) <- c("Accuracy","Sensitivity",
+                     "Specificity",
+                     "F1 score")
+rownames(conclusion) <- 'CART'
+conclusion <- as.table(conclusion)
+conclusion
+```
+
+Sensitivity being too high and Specificity being too low, make adjustment using loss matrix if we want to increase specificity
+
+```{r, tree_3}
+loss_matrix = matrix(c(0, 1, 2.5, 0), nrow=2, ncol=2, byrow = FALSE)
+
+tree_loss = rpart(label ~ .,
+                  data = train,
+                  method = "class",
+                  minbucket=20,
+                  parms = list(loss=loss_matrix),
+                  cp = 0)
+prp(tree_loss)
+
+test$pred_loss = predict(tree_loss, newdata = test, type="class")
+conf_loss= table(test$label,test$pred_loss)
+```
+
+
+```{r, tree_4}
+sum(diag(conf_loss))/sum(rowSums(conf_loss))
+# Accuracy:0.5659898
+# Sensitivity: 30/(30+167) = 0.1522843
+# Specificity: 193/(193+4) = 0.9796954
+# F1 score: 2*(0.1522843 * 0.9796954)/(0.1522843 + 0.9796954) = 0.2635952
+```
+
+```{r}
+conclusion <- matrix(c(0.5659898,0.1522843,0.9796954,0.2635952),ncol=4,byrow=TRUE)
+colnames(conclusion) <- c("Accuracy","Sensitivity",
+                     "Specificity",
+                     "F1 score")
+rownames(conclusion) <- 'CART applied loss matrix'
+conclusion <- as.table(conclusion)
+conclusion
+```
+
+
+Bad model compared to the svm, though very good at predicting one of Sensitivity/Specificity alone.
+
+###Logistic
+```{r,glm} 
+###difficult to compute; logit is not suitable for high dimensional problem
+
+#set.seed(1)
+#logit<- ifelse(tweet_exp$follow_candidate=="clinton",1,0)
+#logit<-data.frame(label=logit,t(td.mat.w))
+#log=glm(label~., data = logit[samp,],family=binomial)
+```
+
+```{r}
+#logit_pre<-predict(log,logit[-samp,-1],type="response")
+#btest<-floor(logit_pre+0.5)
+#conf.matrix = table(tweet_exp[-samp,]$follow_candidate,btest)
+#conf.matrix
+
+#sum(diag(conf.matrix))/sum(rowSums(conf.matrix))
+```
+
+
+##PCA
+if I do not do PCA, there are 2937 terms(2937 features), however, there are only 1976 docs. The number of features is larger than the number of document. Model can not fit the data very well.
+
+Therefore, this section, after implementing PCA, extracting top 100 important features, I fit the several models again. comparing the results.
+
+```{r}
+##
+dt.mat.w=t(td.mat.w)
+dim(dt.mat.w)
+```
+
+```{r}
+pca.dt<-prcomp(dt.mat.w, scale=TRUE) 
+#pca.dt
+```
+
+```{r,top_100_pca}
+dt.pca=predict(pca.dt)[,1:100]
+dim(dt.pca)
+```
+###pca+k_means
+```{r,K_means_PCA}
+set.seed(1)
+k_mean_PCA<-kmeans(dt.pca, centers=2, nstart=10)
+```
+
+```{r}
+cluster<-cbind(tweet_exp,pred=k_mean_PCA$cluster)
+tab<-table(k_mean_PCA$cluster,tweet_exp$follow_candidate)
+tab
+sum(diag(tab))/sum(rowSums(tab))
+
+# Accuracy:0.5
+# Sensitivity: 0
+# Specificity: 988/(988+987) = 0.5002532
+# F1 score: 0
+```
+
+
+```{r}
+conclusion <- matrix(c(0.5,0,0.5002532,0),ncol=4,byrow=TRUE)
+colnames(conclusion) <- c("Accuracy","Sensitivity",
+                     "Specificity",
+                     "F1 score")
+rownames(conclusion) <- 'pca_kmeans'
+conclusion <- as.table(conclusion)
+conclusion
+```
+
+###pca+svm
+```{r,SVM_PCA}
+set.seed(1)
+library(e1071)
+svm<-data.frame(label=as.factor(tweet_exp$follow_candidate),dt.pca)
+#samp=sample(nrow(dt.pca),nrow(dt.pca)*0.8)
+
+svm$label = ifelse(svm$label=="clinton", 0 , 1)
+
+svm$label <- factor(svm$label)
+
+set.seed(1)
+split <- initial_split(svm, prop = 0.8,
+                       strata = 'label')
+set.seed(1)
+train <- training(split)
+set.seed(1)
+test <- testing(split)
+
+set.seed(1)
+model_PCA = svm(label ~ ., data = train,
+              kernel = "linear")
+
+```
+
+```{r}
+svm_pre<-predict(model_PCA,test)
+tab<-table(svm_pre,test$label)
+#table(tweet[-samp,]$follow_candidate)
+tab
+sum(diag(tab))/sum(rowSums(tab))
+
+# Accuracy: 0.5888325
+# Sensitivity: 89/(89+54) = 0.6223776
+# Specificity: 143/(143+108) = 0.5697211
+# F1 score: 2*(0.6223776 * 0.5697211)/(0.6223776 + 0.5697211) = 0.5948864
+```
+
+
+```{r}
+conclusion <- matrix(c(0.5888325,0.6223776,0.5697211,0.5948864),ncol=4,byrow=TRUE)
+colnames(conclusion) <- c("Accuracy","Sensitivity",
+                     "Specificity",
+                     "F1 score")
+rownames(conclusion) <- 'pca_SVM'
+conclusion <- as.table(conclusion)
+conclusion
+```
+
+
+```{r}
+set.seed(1)
+model_svm2 = svm(label~., data = train,
+              kernel = "linear", cost =1, scale = T,
+              probability = TRUE,type="C-classification")
+
+test$p2 <- predict(model_svm2, test, type="response")
+
+test$label_roc2 <- as.numeric(test$label)-1
+test$p2 <- as.numeric(test$p2)-1
+pr2<-prediction(test$p2, test$label_roc2)
+pref2 <- performance(pr2, "tpr", "fpr")
+plot(pref2, main = "ROC Curve", xlab = "1 - Specificity",  ylab = "Sensitivity",  colorize=TRUE)
+abline(0,1)
+```
+
+```{r}
+perf_auc2 = performance(pr2, "auc")
+as.numeric(perf_auc2@y.values)
+```
+
+
+###pca+logistic
+```{r,Logit_PCA}
+set.seed(1)
+logit<- as.factor(tweet_exp$follow_candidate)#ifelse(tweet$follow_candidate=="clinton",1,0)
+logit<-data.frame(label=logit,dt.pca)
+#samp=sample(nrow(dt.pca),nrow(dt.pca)*0.8)
+
+logit$label = ifelse(logit$label=="clinton", 0 , 1)
+
+logit$label <- factor(logit$label)
+
+set.seed(1)
+split <- initial_split(logit, prop = 0.8,
+                       strata = 'label')
+set.seed(1)
+train <- training(split)
+set.seed(1)
+test <- testing(split)
+
+set.seed(1)
+log=glm(label~., data = train, family=binomial, maxit = 100)
+```
+
+
+```{r}
+logit_pre<-predict(log,test,type="response")
+
+btest<-floor(logit_pre+0.5)
+
+conf.matrix = table(test$label,btest)
+conf.matrix
+
+sum(diag(conf.matrix))/sum(rowSums(conf.matrix))
+# Accuracy: 0.5558376
+# Sensitivity: 88/(88+109) = 0.4467005
+# Specificity: 131/(131+66) = 0.6649746
+# F1 score: 2*(0.4467005 * 0.6649746)/(0.4467005 + 0.6649746) = 0.5344088
+```
+
+```{r}
+conclusion <- matrix(c(0.5558376,0.4467005,0.6649746,0.5344088),ncol=4,byrow=TRUE)
+colnames(conclusion) <- c("Accuracy","Sensitivity",
+                     "Specificity",
+                     "F1 score")
+rownames(conclusion) <- 'pca_logistic'
+conclusion <- as.table(conclusion)
+conclusion
+```
+
+
+```{r}
+set.seed(1)
+model_logit = glm(label~., data = train,
+              family=binomial)
+
+test$l <- predict(model_logit, test, type="response")
+
+test$label_roc3 <- as.numeric(test$label)-1
+test$l <- as.numeric(test$l)-1
+prl<-prediction(test$l, test$label_roc3)
+prefl <- performance(prl, "tpr", "fpr")
+plot(prefl, main = "ROC Curve", xlab = "1 - Specificity",  ylab = "Sensitivity",  colorize=TRUE)
+abline(0,1)
+```
+
+```{r}
+perf_aucl = performance(prl, "auc")
+as.numeric(perf_aucl@y.values)
+```
+
+AUC value: 0.6206421
+
+### neural network
+```{r}
+ctrl_k05_roc <- trainControl(method ='cv',number=5 ,
+                             summaryFunction = twoClassSummary,
+                             classProbs = TRUE,
+                             savePredictions = TRUE)
+```
+
+
+```{r,neural_network}
+library(neuralnet)
+set.seed(1)
+logit<- as.factor(tweet_exp$follow_candidate)#ifelse(tweet$follow_candidate=="clinton",1,0)
+logit<-data.frame(label=logit,dt.pca)
+set.seed(1)
+fit_nnet <- train(label ~ ., data = logit,
+                          method = "nnet",
+                          metric = 'ROC',
+                          preProcess = c("center", "scale"),
+                          trControl = ctrl_k05_roc,
+                        trace = FALSE)
+fit_nnet
+```
+
+```{r}
+plot(varImp(fit_nnet), top = 20)
+```
+```{r}
+#fit_nnet$bestTune
+
+tab = (fit_nnet$pred )%>%filter(size == fit_nnet$bestTune$size,decay==fit_nnet$bestTune$decay)
+tab= table(tab$obs,tab$pred)
+tab
+accuracy = (sum(diag(tab)))/sum(tab)
+cat('accuracy: ',accuracy)
+
+p = tab[1,1]/(tab[1,1]+tab[2,1])
+r = tab[1,1]/(tab[1,1]+tab[1,2])
+f1 = (2*p*r)/(p+r)
+cat('\nF1:',f1)
+```
+
+```{r, fig.width = 15, fig.height=25}
+library(nnet)
+library(NeuralNetTools)
+plotnet(fit_nnet$finalModel, y_names = "vocabularies")
+title("Graphical Representation of our Neural Network")
+```
+### random forest
+```{r,random_forest}
+set.seed(4321)
+data=data.frame(label=tweet_exp$follow_candidate,dt.pca)
+fit_rf <- train(label ~ ., data =data,
+                       method = "rf", trControl = ctrl_k05_roc ,metric = "ROC",
+                      importance = TRUE)
+
+fit_rf
+```
+
+```{r}
+tab = (fit_rf$pred )%>%filter(mtry == fit_rf$bestTune$mtry)
+tab= table(tab$obs,tab$pred)
+tab
+accuracy = (sum(diag(tab)))/sum(tab)
+cat('accuracy: ',accuracy)
+
+p = tab[1,1]/(tab[1,1]+tab[2,1])
+r = tab[1,1]/(tab[1,1]+tab[1,2])
+f1 = (2*p*r)/(p+r)
+cat('\nF1:',f1)
+```
+
+
+```{r}
+plot(fit_rf)
+```
+
+### classification tree
+
+```{r}
+set.seed(1)
+logit<- as.factor(tweet_exp$follow_candidate)#ifelse(tweet$follow_candidate=="clinton",1,0)
+logit<-data.frame(label=logit,dt.pca)
+#samp=sample(nrow(dt.pca),nrow(dt.pca)*0.8)
+
+logit$label = ifelse(logit$label=="clinton", 0 , 1)
+
+logit$label <- factor(logit$label)
+
+set.seed(1)
+split <- initial_split(logit, prop = 0.8,
+                       strata = 'label')
+set.seed(1)
+train <- training(split)
+set.seed(1)
+test <- testing(split)
+
+tree = rpart(label ~ ., method = "class", data = train, minbucket = 10, cp = 0)
+
+set.seed(1)
+prp(tree, extra = 1)
+
+# overplotting
+plotcp(tree)
+
+# best cp which is 1 standard deviation below mean is when cp=0.0047
+# increase minbucket of tree to make it not overplotting
+tree2 = rpart(label ~ ., method = "class", data = train, minbucket = 30, cp = 0.0047)
+set.seed(1)
+prp(tree2, extra = 1)
+```
+
+```{r}
+test$pred_tree2 = predict(tree2, newdata = test, type="class")
+conf_matrix = table(test$label,test$pred_tree2)
+conf_matrix
+
+sum(diag(conf_matrix))/sum(rowSums(conf_matrix))
+
+# Accuracy:0.5736041
+# Sensitivity: 120/(120+77) = 0.6091371
+# Specificity: 106/(106+91) = 0.5380711
+# F1 score: 2*(0.6091371 * 0.5380711)/(0.6091371 + 0.5380711) = 0.5714029
+```
+
+
+```{r}
+conclusion <- matrix(c(0.5736041,0.6091371,0.5380711,0.5714029),ncol=4,byrow=TRUE)
+colnames(conclusion) <- c("Accuracy","Sensitivity",
+                     "Specificity",
+                     "F1 score")
+rownames(conclusion) <- 'pca_CART'
+conclusion <- as.table(conclusion)
+conclusion
+```
+
+
+way better than it is in the non-pca data. Still generally worse than svm. However, the area under curve is larger in logistic regression than it in svm.
+
+
+## The second feature---sentiment
+From the result above, we found that TF-IDF, as a input feature, does not work well in several. Therefore, we introduce new variables to improve the performance of our models.   
+After data exploration, we found that supporters show more positive attitudes toward their favorite candidates, meanwhile, they show more negative attitudes toward candidates they don't like.
+By measure the sentiment of text, we can get one more feature indicating the attitude of the publisher towards certain candidates.
+
+####pre_processing 
+```{r,tweet_exp_corpus}
+f2corpus = Corpus(VectorSource(tweet_exp$text))
+f2corpus = CleanCorpus(f2corpus)
+#corpus=RemoveNames(corpus)
+
+```
+
+```{r}
+text=(content(f2corpus))
+text=trimws(text, which = c("left"), whitespace = "[ \t\r\n]")
+text=list(strsplit(text, " "))
+#text
+```
+
+```{r}
+Sent<-data.frame(Trump_sent=rep(0,length(content(f2corpus))),Clinton_sent=rep(0,length(content(f2corpus))))
+```
+
+```{r}
+deny = c('never','not','do',"no","nor","isnt","arent","wasnt","werent" ,"hasnt","havent","hadnt","doesnt" ,   "dont","didnt","wont" ,"wouldnt" ,  "shant","shouldnt" ,"cant","cannot","couldnt", "mustnt",'hardly','nobody', 'without','few')
+def = data.frame(word = c('abort','abortion','tax','killer','lie','question','answer'),value =c(-2,-2,-1,-2,-2,-1,1))
+```
+
+###sentiment extraction 
+```{r}
+for(i in seq(1,length(content(f2corpus)))){
+  
+ # print(i)
+    list_text=data.frame(word=text[[1]][[i]])
+    #print(list_text)
+  #
+    len_text = nrow(list_text)
+    afinn_new = rbind(get_sentiments("afinn"),def)
+    score = list_text %>% inner_join(afinn_new, by="word")
+    count = table(score$word)
+    current=table(score$word)
+
+  if (nrow(score)!=0)
+    {for (j in (1:nrow(score))){
+      #print(score$word[j])
+      item = score$word[j]
+      #print(list_text$word==score$word[j])
+      index=which(list_text$word==score$word[j])[1+count[item]-current[item]]
+      current[item] = current[item]-1
+
+      
+      for (k in seq(1,(len_text-1))){
+
+        if ((index-k) %in% (1:len_text)){
+          if(list_text$word[index-k] %in% Trump){
+            Sent[i,1] = Sent[i,1]+score$value[j]
+            break
+          }
+          if(list_text$word[index-k] %in% Clinton){
+            Sent[i,2] = Sent[i,2]+score$value[j]
+            break
+          }
+        }
+        
+        if ((index+k) %in% (1:len_text)){
+          if(list_text$word[index+k] %in% Trump){
+            Sent[i,1] =Sent[i,1]+ score$value[j]
+            break
+          }
+          if(list_text$word[index+k] %in% Clinton){
+            Sent[i,2] = Sent[i,2]+score$value[j]
+            break
+          }
+        }
+        
+        
+      }
+      
+      
+    }}
+    
+ if(length(intersect(unlist(list(list_text$word)),deny))!=0)
+ {
+   sect = intersect(unlist(list(list_text$word)),deny)
+   loc_C = which(unlist(list(list_text$word)) %in% Clinton)
+   loc_T=which(unlist(list(list_text$word)) %in% Trump)
+   
+   loc= which(unlist(list(list_text$word)) %in% sect)
+   
+   if(length(loc_C)!=0 || length(loc_C)!=0 )
+   {
+     for (l in (1:length(sect))){
+     if (min(loc_C-loc[l])>min(loc_T-loc[l]))
+     {
+       Sent[i,1] = (-1)*Sent[i,1]
+     }
+     else{
+       Sent[i,2] = (-1)*Sent[i,1]
+     }
+     
+   }
+     
+   }
+
+ 
+ }
+}
+```
+
+###prediction
+Predicting political leanings through sentiment 
+```{r}
+head(Sent,length(content(f2corpus)))
+flag = Sent$Trump_sent-Sent$Clinton_sent
+#flag = ifelse((flag>0),"Trump",'Clinton')
+a=Sent%>%mutate(pre = ifelse((flag<=0),'clinton',"trump"))
+a=a[1:length(content(f2corpus)),]
+#a
+All = data.frame(a,label=tweet_exp[1:length(content(f2corpus)),]$follow_candidate)
+#All
+tab=table(All$pre,All$label)
+tab
+sum(diag(tab))/length(content(f2corpus))
+
+```
+
+##Feature combination (f1+f2)
+```{r}
+dim(dt.pca)
+dim(Sent)
+F= cbind(Sent,dt.pca)
+dim(F)
+```
+## Model fit
+Since random forest,SVM have relatively good performance in the previous stage, we continued to use RF for prediction.
+
+### random forest
+```{r}
+set.seed(4321)
+data=data.frame(label=tweet_exp$follow_candidate,F)
+fit_rf <- train(label ~ ., data =data,
+                       method = "rf", trControl = ctrl_k05_roc ,metric = "ROC",
+                      importance = TRUE)
+
+fit_rf
+```
+
+```{r}
+plot(fit_rf)
+```
+```{r}
+#fit_rf$bestTune$mtry
+tab = (fit_rf$pred )%>%filter(mtry == fit_rf$bestTune$mtry)
+tab= table(tab$obs,tab$pred)
+tab
+accuracy = (sum(diag(tab)))/sum(tab)
+cat('accuracy: ',accuracy)
+
+p = tab[1,1]/(tab[1,1]+tab[2,1])
+r = tab[1,1]/(tab[1,1]+tab[1,2])
+f1 = (2*p*r)/(p+r)
+cat('\nF1:',f1)
+```
+
+
+###svm
+```{r,SVM_F}
+set.seed(1)
+library(e1071)
+svm<-data.frame(label=as.factor(tweet_exp$follow_candidate),F)
+
+
+svm$label = ifelse(svm$label=="clinton", 0 , 1)
+
+svm$label <- factor(svm$label)
+
+set.seed(1)
+split <- initial_split(svm, prop = 0.8,
+                       strata = 'label')
+set.seed(1)
+train <- training(split)
+set.seed(1)
+test <- testing(split)
+
+
+#samp=sample(nrow(F),nrow(F)*0.8)
+model_PCA <- svm(label~., data = train,kernel='linear')
+```
+
+```{r}
+svm_pre<-predict(model_PCA,test)
+tab<-table(svm_pre,test$label)
+#table(tweet[-samp,]$follow_candidate)
+tab
+print("Accuracy")
+sum(diag(tab))/sum(rowSums(tab))
+
+# Sensitivity: 77/(77+47) = 0.6209677
+# Specificity: 150/(150+120) = 0.5555556
+# F1 score: 2*(0.6209677 * 0.5555556)/(0.6209677 + 0.5555556) = 0.5864433
+```
+
+
+
+```{r}
+conclusion <- matrix(c(0.5888325,0.6209677,0.5555556,0.5864433),ncol=4,byrow=TRUE)
+colnames(conclusion) <- c("Accuracy","Sensitivity",
+                     "Specificity",
+                     "F1 score")
+rownames(conclusion) <- 'pca_senti_SVM'
+conclusion <- as.table(conclusion)
+conclusion
+```
+
+
+```{r}
+detach(package:neuralnet)
+set.seed(1)
+model_svm_final = svm(label~., data = train,kernel='linear')
+test$svm <- predict(model_svm_final, test, type="response")
+
+test$label_roc_svm <- as.numeric(test$label)-1
+test$svm_f <- as.numeric(test$svm)-1
+pr_scv<-prediction(test$svm_f, test$label_roc_svm)
+pref_svm <- performance(pr_scv, "tpr", "fpr")
+plot(pref_svm, main = "ROC Curve", xlab = "1 - Specificity",  ylab = "Sensitivity",  colorize=TRUE)
+abline(0,1)
+```
+
+```{r}
+perf_auc_svm = performance(pr_scv, "auc")
+as.numeric(perf_auc_svm@y.values)
+```
+###logit
+```{r}
+set.seed(1)
+library(e1071)
+logit<-data.frame(label=as.factor(tweet_exp$follow_candidate),F)
+
+
+logit$label = ifelse(logit$label=="clinton", 0 , 1)
+
+logit$label <- factor(logit$label)
+
+set.seed(1)
+split <- initial_split(logit, prop = 0.8,
+                       strata = 'label')
+set.seed(1)
+train <- training(split)
+set.seed(1)
+test <- testing(split)
+
+
+#samp=sample(nrow(F),nrow(F)*0.8)
+model_logit <- glm(label~., data = train, family='binomial', maxit=100)
+```
+
+```{r}
+logit_pre<-predict(model_logit, test)
+tab<-table(logit_pre, test$label)
+#table(tweet[-samp,]$follow_candidate)
+print("Accuracy")
+sum(diag(tab))/sum(rowSums(tab))
+```
+Accuracy is too low, we won't consider this model under current data.
+
+###neural network
+```{r,neural_network_F}
+set.seed(4321)
+data = data.frame(label=tweet_exp$follow_candidate,F)
+fit_nnet <- train(label ~ ., data = data,
+                          method = "nnet",
+                          metric = 'ROC',
+                          preProcess = c("center", "scale"),
+                          trControl = ctrl_k05_roc,
+                        trace = FALSE)
+
+fit_nnet
+```
+
+```{r}
+plot(varImp(fit_nnet), top = 20)
+```
+
+```{r}
+##nnet_accuracy and F1
+tab = (fit_nnet$pred )%>%filter(size == fit_nnet$bestTune$size,decay==fit_nnet$bestTune$decay)
+tab= table(tab$obs,tab$pred)
+tab
+accuracy = (sum(diag(tab)))/sum(tab)
+cat('accuracy: ',accuracy)
+
+p = tab[1,1]/(tab[1,1]+tab[2,1])
+r = tab[1,1]/(tab[1,1]+tab[1,2])
+f1 = (2*p*r)/(p+r)
+cat('\nF1:',f1)
+```
+
+
+
+```{r, fig.width = 15, fig.height=10}
+library(nnet)
+library(NeuralNetTools)
+plotnet(fit_nnet$finalModel, y_names = "vocabularies")
+title("Graphical Representation of our Neural Network")
+```
+
+```{r}
+conclusion <- matrix(c(0.500,0.5,0.5005,0.5002,'NA',0.5,0,0.5002,0,'NA',0.555,0.446,0.664,0.534,'NA',0.525,0.928,0.121,0.215,'NA',0.573,0.609,0.538,0.571,'NA',0.616,0.636,0.601,0.618,'NA',0.588,0.622,0.569,0.594,'NA',0.576,0.620,0.555,0.586,'NA',0.653,0.686,0.619,0.664,0.718,0.663,0.703,0.624,0.677,0.734,0.609,0.665,0.553,0.630,0.652,0.615,0.609,0.622,0.613,0.647),ncol=5,byrow=TRUE)
+rownames(conclusion) <- c("kmeans(TDM)","kmeans(TDM+PCA)",
+                     "logistic(TDM+PCA)",
+                     "classification tree(TDM)","classification tree(TDM+PCA)",
+                     "svm(TDM)","svm(TDM+PCA)","svm(TDM+PCA+sentiment)",
+                     "random forest(TDM+PCA)","random forest(TDM+PCA+sentiment)",
+                     "neural network(TDM+PCA)","neural network(TDM+PCA+sentiment)")
+
+colnames(conclusion) <- c("Accuracy","Sensitivity","Specificity","F1 score","ROC")
+conclusion <- as.table(conclusion)
+conclusion
+```
+
